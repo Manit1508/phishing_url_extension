@@ -1,0 +1,10 @@
+{
+    "manifest_version": 3,
+    "name": "PhishShield URL Detector",
+    "version": "1.0",
+    "description": "Real-time phishing detection browser extension.",
+    "permissions": ["activeTab"],
+    "action": {
+      "default_popup": "popup.html"
+    }
+  }

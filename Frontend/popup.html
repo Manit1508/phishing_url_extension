@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <h2>🛡️ PhishShield</h2>
+    <p>Check if a link is safe before opening it.</p>
+    
+    <input type="text" id="url-input" placeholder="https://example.com" />
+    <button id="scan-btn">Scan URL</button>
+    <button id="current-tab-btn" class="secondary">Use Current Tab</button>
+
+    <div id="result" class="hidden">
+      <h3 id="verdict"></h3>
+      <ul id="reasons"></ul>
+    </div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
