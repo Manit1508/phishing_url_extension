@@ -3,12 +3,10 @@ import pandas as pd
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from urllib.parse import urlparse
 from features import extract_url_features
 
 app = FastAPI(title="PhishShield ML Inference API")
 
-# Enable CORS so the Chrome Extension can talk to localhost:8000
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,7 +15,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load the trained model produced by train.py
 model = joblib.load("phishing_model.pkl")
 
 class URLRequest(BaseModel):
@@ -29,64 +26,73 @@ def health_check():
 
 @app.post("/predict")
 def predict_url(payload: URLRequest):
-    url = payload.url.strip()
+    raw_url = payload.url.strip()
+    url_lower = raw_url.lower()
     
-    # 1. Trusted Domain Whitelist
-    trusted_domains = ["google.com", "github.com", "vercel.app", "vit.edu", "sih.gov.in"]
-    if any(domain in url for domain in trusted_domains):
+    # Check if user explicitly typed an insecure protocol
+    is_explicit_http = url_lower.startswith("http://")
+    
+    # Normalize for whitelist checking
+    normalized_url = raw_url if raw_url.startswith(("http://", "https://")) else "https://" + raw_url
+    
+    # 1. Trusted Whitelist
+    trusted_domains = ["google.com", "github.com", "vercel.app", "vit.edu", "sih.gov.in", "wikipedia.org", "apple.com"]
+    if any(domain in normalized_url.lower() for domain in trusted_domains):
         return {
             "is_phishing": False,
             "probability": 0.01,
             "entropy": 0.0,
-            "explanations": ["Domain is recognized on the system's verified safe whitelist."]
+            "red_flags": [],
+            "green_flags": ["Domain matches verified safe baseline whitelist.", "Standard commercial infrastructure confirmed."]
         }
     
-    # 2. Extract lexical features using the same logic used during training
-    feats_dict = extract_url_features(url)
+    # 2. Extract Features
+    feats_dict = extract_url_features(raw_url)
     features_df = pd.DataFrame([feats_dict])
     
-    # 3. Model inference
-    prediction = int(model.predict(features_df)[0])
+    # 3. Predict probability
     probabilities = model.predict_proba(features_df)[0]
     phishing_prob = float(probabilities[1])
 
-    # 4. Human-readable explainability signals
-    reasons = []
-    
-    # --- NEW FIX: DGA & Disposable Domain Heuristic ---
-    parsed = urlparse(url if "://" in url else "https://" + url)
-    hostname = parsed.hostname or ""
-    
-    # Catch randomly generated fake domains (e.g., vortex-sprout.net)
-    if "-" in hostname and not hostname.endswith(".com"):
-        prediction = 1
-        phishing_prob = max(phishing_prob, 0.88) # Override baseline ML probability
-        reasons.append(f"Hostname '{hostname}' uses a hyphenated non-.com structure, commonly used by Domain Generation Algorithms (DGAs).")
-    # --------------------------------------------------
+    is_phishing = phishing_prob >= 0.65
 
+    # 4. Dynamic Explainability Engine
+    red_flags = []
+    green_flags = []
+
+    # --- Suspicious Markers ---
     if feats_dict["has_ip"]:
-        reasons.append("URL uses an IPv4 address instead of a standard domain name.")
-    if feats_dict["url_length"] > 75:
-        reasons.append(f"Excessive URL length ({feats_dict['url_length']} characters) indicates obfuscation.")
-    if feats_dict["num_at"] > 0:
-        reasons.append("Contains '@' symbol, which ignores preceding credentials in browsers.")
-    if feats_dict["entropy"] > 4.8:
-        reasons.append(f"High character entropy ({feats_dict['entropy']:.2f}) indicates auto-generated text.")
-    if feats_dict["num_hyphens"] >= 3:
-        reasons.append(f"Multiple hyphens ({feats_dict['num_hyphens']}) detected in domain/path.")
+        red_flags.append("Host utilizes a raw IP address to bypass domain reputation filters.")
+    if is_explicit_http:
+        red_flags.append("Connection uses unencrypted HTTP, exposing data to interception.")
+    if feats_dict["digit_ratio"] > 0.30:
+        red_flags.append(f"Highly abnormal numerical density ({feats_dict['digit_ratio']*100:.0f}%) detected.")
+    if feats_dict["has_suspicious_tld"]:
+        red_flags.append("Top-Level Domain is heavily associated with disposable phishing infrastructure.")
+    if feats_dict["num_hyphens"] >= 2:
+        red_flags.append("Multiple hyphens detected, a common Domain Generation Algorithm (DGA) trait.")
     if feats_dict["has_suspicious_keyword"]:
-        reasons.append("Sensitive authentication/banking keywords detected in URL.")
+        red_flags.append("Authentication or credential-harvesting keywords found in target path.")
 
-    # 5. Sync Explanation with ML Verdict
-    if not reasons:
-        if prediction == 1:
-            reasons.append("The Machine Learning model identified latent phishing patterns despite passing basic structural checks.")
-        else:
-            reasons.append("Lexical patterns align with safe baseline conventions.")
+    # --- Legitimate Markers ---
+    if not is_explicit_http and feats_dict["is_https"]:
+        green_flags.append("Secure encrypted routing (HTTPS) verified.")
+    if feats_dict["entropy"] < 4.2:
+        green_flags.append("Domain character distribution aligns with human-readable conventions.")
+    if feats_dict["num_subdomains"] <= 1:
+        green_flags.append("Clean routing path with standard structural depth.")
+    if not feats_dict["has_suspicious_tld"] and not feats_dict["has_ip"]:
+        green_flags.append("Top-Level Domain belongs to a standard registry.")
+
+    # Fallback reasoning if no flags trigger
+    if not red_flags and is_phishing:
+        red_flags.append("XGBoost model identified latent mathematical phishing patterns.")
+    if not green_flags and not is_phishing:
+        green_flags.append("Lexical patterns conform to baseline domain conventions.")
 
     return {
-        "is_phishing": bool(prediction == 1),
+        "is_phishing": is_phishing,
         "probability": phishing_prob,
-        "entropy": feats_dict["entropy"],
-        "explanations": reasons
+        "red_flags": red_flags,
+        "green_flags": green_flags
     }
